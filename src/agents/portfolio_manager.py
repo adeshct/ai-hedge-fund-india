@@ -11,8 +11,8 @@ from src.utils.llm import call_llm
 
 class PortfolioDecision(BaseModel):
     action: Literal["buy", "sell", "short", "cover", "hold"]
-    quantity: int = Field(description="Number of shares to trade")
-    confidence: int = Field(description="Confidence 0-100")
+    quantity: int = Field(ge=0, description="Number of shares to trade")
+    confidence: int = Field(ge=0, le=100, description="Confidence 0-100")
     reasoning: str = Field(description="Reasoning for the decision")
 
 

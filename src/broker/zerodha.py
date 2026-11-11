@@ -101,6 +101,31 @@ class ZerodhaBroker(Broker):
     def resolve(self, ticker: str, exchange: Optional[str] = None) -> InstrumentRef:
         return self._registry.resolve(ticker, exchange=exchange)
 
+    def place_limit_order(
+        self,
+        instrument: InstrumentRef,
+        transaction_type: str,
+        quantity: int,
+        price: float,
+        product: str = "CNC",
+    ) -> str:
+        """Submit a regular-session delivery limit order to Kite."""
+        if transaction_type not in {"BUY", "SELL"}:
+            raise ValueError(f"Unsupported transaction type: {transaction_type}")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("Order quantity and limit price must be positive.")
+        return self._client.place_order(
+            variety=self._client.VARIETY_REGULAR,
+            exchange=instrument.exchange,
+            tradingsymbol=instrument.tradingsymbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=product,
+            order_type=self._client.ORDER_TYPE_LIMIT,
+            price=price,
+            validity=self._client.VALIDITY_DAY,
+        )
+
     def historical_candles(
         self,
         instrument: InstrumentRef,

@@ -7,7 +7,7 @@
 
 AI-powered hedge fund for Indian **NSE/BSE** markets — 22 AI agents analyze stocks with distinct investment philosophies, from Buffett to Jhunjhunwala. Adapted from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) (MIT).
 
-> **Educational purposes only.** Not intended for real trading or investment.
+> **Educational purposes only.** Not investment advice. Live execution can lose money; review and configure all risk limits before use.
 
 ## Quick Start
 
@@ -145,12 +145,36 @@ poetry run hedgefund run --ticker RELIANCE --no-save
 
 ## Zerodha (Kite Connect)
 
-Two independent capabilities are wired up, both read-only — **no orders are placed**:
+Two independent read capabilities are available:
 
 1. **Live prices** — `--data-source zerodha` routes OHLCV through Kite instead of yfinance
    (fundamentals, news, and insider data still come from yfinance).
 2. **Live portfolio** — `--broker zerodha` hydrates the portfolio the risk manager sizes
    against with your real cash, holdings, and positions instead of a fabricated flat book.
+
+The analysis pipeline also supports opt-in order execution after all analyst agents,
+the risk manager, and the portfolio manager have completed:
+
+```bash
+# Simulate and persist fills in data/paper_portfolio.json (default seed: ₹1 Cr)
+poetry run hedgefund run --ticker RELIANCE,TCS --execution-mode paper
+
+# Automatically submit eligible Zerodha delivery limit orders
+poetry run hedgefund run --ticker RELIANCE,TCS --execution-mode live --broker zerodha
+```
+
+Execution defaults to `analysis` (no orders). Paper/live orders require a portfolio-manager
+confidence of at least 75% and are capped at ₹50,000 per order by default; tune these with
+`--confidence-threshold` and `--max-order-value`. Buy risk allowance scales with confidence
+and is capped by the risk manager's volatility/correlation-adjusted position limit and cash; sells are
+limited to existing long holdings. Only buy/sell CNC delivery limit orders are supported.
+Live mode fetches fresh Kite prices, limits buys at or below and sells at or above those prices, and requires a
+valid Kite session. Orders may remain unfilled; execution does not imply a fill. Paper-account
+state is local and can be changed with `--paper-portfolio`.
+
+Daily/weekly drawdown circuit breakers are not implemented; the corresponding settings in
+`config/settings.yaml` are not currently enforced by the order executor. Live trading still
+requires independent monitoring.
 
 Setup:
 

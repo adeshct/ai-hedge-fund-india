@@ -13,6 +13,7 @@ Inspired by virattt/ai-hedge-fund (MIT License).
 
 import argparse
 import json
+import math
 import os
 import warnings
 from datetime import datetime
@@ -58,7 +59,11 @@ def _display_name(ticker: str) -> str:
 
 
 def _needs_broker(args) -> bool:
-    return getattr(args, "broker", None) == "zerodha" or getattr(args, "data_source", None) == "zerodha"
+    return (
+        getattr(args, "broker", None) == "zerodha"
+        or getattr(args, "data_source", None) == "zerodha"
+        or getattr(args, "execution_mode", None) == "live"
+    )
 
 
 def _connect_broker(args):
@@ -148,7 +153,23 @@ def cmd_run(args):
     )
     console.print()
 
-    portfolio = _live_portfolio(broker, args, tickers) if broker else _flat_portfolio(args, tickers)
+    execution_mode = getattr(args, "execution_mode", "analysis")
+    if execution_mode == "paper":
+        from src.broker.execution import DEFAULT_PAPER_PORTFOLIO, load_paper_portfolio
+
+        portfolio = load_paper_portfolio(
+            args.paper_portfolio or DEFAULT_PAPER_PORTFOLIO,
+            args.initial_cash,
+            tickers,
+        )
+        console.print(f"[dim]Paper book: ₹{portfolio['cash']:,.0f} cash[/dim]")
+    elif execution_mode == "live":
+        if broker is None:
+            console.print("[red]Live execution requires --broker zerodha and an authenticated session.[/red]")
+            return
+        portfolio = _live_portfolio(broker, args, tickers)
+    else:
+        portfolio = _live_portfolio(broker, args, tickers) if broker else _flat_portfolio(args, tickers)
 
     try:
         workflow = create_workflow()
@@ -184,6 +205,21 @@ def cmd_run(args):
                     console.print(f"[red]Report save failed for {ticker}: {e}[/red]")
 
         _print_results(tickers, analyst_signals, decisions, show_reasoning)
+        if execution_mode in {"paper", "live"}:
+            from src.broker.execution import DEFAULT_PAPER_PORTFOLIO, execute_decisions
+
+            risk_signals = analyst_signals.get("risk_management_agent", {})
+            execution_results = execute_decisions(
+                mode=execution_mode,
+                broker=broker,
+                decisions=decisions,
+                risk_signals=risk_signals,
+                portfolio=portfolio,
+                confidence_threshold=args.confidence_threshold,
+                max_order_value=args.max_order_value,
+                paper_portfolio_path=args.paper_portfolio or DEFAULT_PAPER_PORTFOLIO,
+            )
+            _print_execution_results(execution_mode, execution_results)
 
     finally:
         progress.stop()
@@ -223,6 +259,32 @@ def _print_results(tickers, analyst_signals, decisions, show_reasoning):
             console.print(Panel(f"[{action_color}]Decision: {action.upper()} {qty} shares[/{action_color}] "
                                f"(confidence: {conf}%)\n{reasoning}", title="Portfolio Manager"))
 
+    console.print()
+
+
+def _print_execution_results(mode, results):
+    console.rule(f"[bold blue]{mode.title()} Order Execution[/bold blue]")
+    table = Table()
+    for column in ("Symbol", "Action", "Qty", "Limit Price", "Confidence", "Status"):
+        table.add_column(column)
+    for result in results:
+        if result["status"] == "skipped":
+            table.add_row(result["ticker"], "-", "-", "-", "-", f"Skipped: {result['reason']}")
+            continue
+        status = result["status"]
+        if result.get("order_id"):
+            status = f"{status} · {result['order_id']}"
+        table.add_row(
+            result["ticker"],
+            result["action"].upper(),
+            str(result["quantity"]),
+            f"₹{result['price']:,.2f}",
+            f"{result['confidence']:.0f}%",
+            status,
+        )
+    console.print(table)
+    if mode == "live":
+        console.print("[yellow]Live orders are limit orders and may remain unfilled; check their status with your broker.[/yellow]")
     console.print()
 
 
@@ -455,8 +517,30 @@ def main():
     run.add_argument("--show-reasoning", action="store_true", help="Show agent reasoning")
     run.add_argument("--model", default="deepseek-chat", help="LLM model name")
     run.add_argument("--provider", default="DeepSeek", help="LLM provider (DeepSeek, OpenAI, Anthropic, Groq)")
-    run.add_argument("--initial-cash", type=float, default=10000000.0, help="Initial cash (default ₹1 Cr)")
+    run.add_argument("--initial-cash", type=float, default=10000000.0, help="Initial cash (default INR 1 Cr)")
     run.add_argument("--margin-requirement", type=float, default=0.0, help="Margin requirement")
+    run.add_argument(
+        "--execution-mode",
+        choices=["analysis", "paper", "live"],
+        default="analysis",
+        help="analysis (default), persistent paper trading, or automatic live limit orders",
+    )
+    run.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=75.0,
+        help="Minimum portfolio-manager confidence for an order (default: 75)",
+    )
+    run.add_argument(
+        "--max-order-value",
+        type=float,
+        default=50000.0,
+        help="Maximum notional value per order in INR (default: 50000)",
+    )
+    run.add_argument(
+        "--paper-portfolio",
+        help="Paper account JSON path (default: data/paper_portfolio.json)",
+    )
     run.add_argument("--no-save", action="store_true", help="Skip saving reports to disk")
     run.add_argument("--no-web-fallback", action="store_true", help="Skip web enrichment scraping")
     run.add_argument(
@@ -497,6 +581,13 @@ def main():
     if not args.command:
         parser.print_help()
         return
+    if args.command == "run":
+        if not math.isfinite(args.confidence_threshold) or not 0 <= args.confidence_threshold <= 100:
+            parser.error("--confidence-threshold must be between 0 and 100")
+        if not math.isfinite(args.max_order_value) or args.max_order_value <= 0:
+            parser.error("--max-order-value must be positive")
+        if args.execution_mode == "live" and args.broker not in (None, "zerodha"):
+            parser.error("Live execution currently supports only Zerodha.")
 
     debug = args.debug or os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
     if not debug:
