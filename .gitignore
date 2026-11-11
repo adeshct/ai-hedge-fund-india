@@ -10,6 +10,7 @@ dist/
 .ruff_cache/
 .cache/
 data/cache/
+data/paper_portfolio.json
 reports/
 *.pkl
 

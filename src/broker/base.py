@@ -12,7 +12,7 @@ from src.broker.models import BrokerPosition, Funds, InstrumentRef
 
 
 class Broker(ABC):
-    """Read-only view of a brokerage account."""
+    """Broker account interface."""
 
     @abstractmethod
     def get_profile(self) -> dict:
@@ -37,3 +37,14 @@ class Broker(ABC):
     @abstractmethod
     def resolve(self, ticker: str, exchange: Optional[str] = None) -> InstrumentRef:
         """Map an internal ticker to its exchange instrument."""
+
+    def place_limit_order(
+        self,
+        instrument: InstrumentRef,
+        transaction_type: str,
+        quantity: int,
+        price: float,
+        product: str = "CNC",
+    ) -> str:
+        """Submit a delivery limit order and return the broker order ID."""
+        raise NotImplementedError("This broker does not support order placement.")
