@@ -83,6 +83,9 @@ class FakeBroker(Broker):
     def resolve(self, ticker, exchange=None):
         return _ref(ticker.split(".")[0])
 
+    def get_open_orders(self):
+        return []
+
     def get_historical(self, ticker, start_date, end_date, interval="day"):
         return list(self._candles)
 

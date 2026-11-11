@@ -166,15 +166,44 @@ poetry run hedgefund run --ticker RELIANCE,TCS --execution-mode live --broker ze
 Execution defaults to `analysis` (no orders). Paper/live orders require a portfolio-manager
 confidence of at least 75% and are capped at ₹50,000 per order by default; tune these with
 `--confidence-threshold` and `--max-order-value`. Buy risk allowance scales with confidence
-and is capped by the risk manager's volatility/correlation-adjusted position limit and cash; sells are
-limited to existing long holdings. Only buy/sell CNC delivery limit orders are supported.
-Live mode fetches fresh Kite prices, limits buys at or below and sells at or above those prices, and requires a
-valid Kite session. Orders may remain unfilled; execution does not imply a fill. Paper-account
-state is local and can be changed with `--paper-portfolio`.
+and is capped by the configured per-trade equity fraction, the risk manager's volatility/
+correlation-adjusted position limit, available cash, and maximum position count; sells are
+limited to existing long holdings. The configured daily loss limit stops new orders for the rest
+of that session. Only buy/sell CNC delivery limit orders are supported. Live mode fetches fresh
+Kite prices, avoids tickers with pending orders, limits buys at or below and sells at or above
+those prices, and requires a valid Kite session. Orders may remain unfilled; execution does not
+imply a fill. Paper-account and daily-stop state are local files.
 
-Daily/weekly drawdown circuit breakers are not implemented; the corresponding settings in
-`config/settings.yaml` are not currently enforced by the order executor. Live trading still
-requires independent monitoring.
+### Continuous watch mode
+
+Create a one-column CSV (header optional), for example:
+
+```csv
+ticker
+RELIANCE.NS
+TCS.NS
+HDFCBANK.NS
+```
+
+Then start a session watcher. It reloads the CSV each cycle, runs the analyst/risk/portfolio
+pipeline, and trades on the selected paper/live account:
+
+```bash
+# Default, safe paper account; scans every five minutes during NSE hours
+poetry run hedgefund watch --ticker-csv tickers.csv
+
+# Explicitly enable automatic live Zerodha orders
+poetry run hedgefund watch --ticker-csv tickers.csv --execution-mode live --broker zerodha
+```
+
+Watch mode runs on weekdays from 09:15 to 15:30 IST, then exits; press Ctrl+C to stop sooner.
+If a scan takes longer than its interval, cycles do not overlap and the next scan starts after
+the current one finishes. It reloads the CSV every cycle, uses the confidence, cash, trade-size,
+position-count, pending-order, and daily-loss safeguards above, and persists the daily stop so
+restarting the process does not reset it. The daily-loss baseline is captured at the first scan
+of the day, so start at market open for a full-session drawdown measure. The scheduler checks
+weekdays and market hours but does not include an exchange-holiday calendar; live execution
+should be independently monitored, and automated orders can lose money.
 
 Setup:
 

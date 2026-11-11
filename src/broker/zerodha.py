@@ -101,6 +101,32 @@ class ZerodhaBroker(Broker):
     def resolve(self, ticker: str, exchange: Optional[str] = None) -> InstrumentRef:
         return self._registry.resolve(ticker, exchange=exchange)
 
+    def get_open_orders(self) -> list[dict]:
+        """Return pending Kite orders, normalized to the application's ticker format."""
+        active_statuses = {
+            "OPEN",
+            "PENDING",
+            "TRIGGER PENDING",
+            "AMO REQ RECEIVED",
+            "MODIFY PENDING",
+            "CANCEL PENDING",
+        }
+        open_orders = []
+        for order in self._client.orders() or []:
+            if str(order.get("status", "")).upper() not in active_statuses:
+                continue
+            instrument = InstrumentRef(
+                exchange=order.get("exchange") or "NSE",
+                tradingsymbol=order["tradingsymbol"],
+                instrument_token=int(order.get("instrument_token") or 0),
+            )
+            open_orders.append({
+                "ticker": instrument.yf_ticker,
+                "status": order.get("status"),
+                "order_id": order.get("order_id"),
+            })
+        return open_orders
+
     def place_limit_order(
         self,
         instrument: InstrumentRef,

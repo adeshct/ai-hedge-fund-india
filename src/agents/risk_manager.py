@@ -95,6 +95,14 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             },
         }
 
+    for ticker in portfolio.get("positions", {}):
+        if ticker not in risk_analysis:
+            risk_analysis[ticker] = {
+                "remaining_position_limit": 0.0,
+                "current_price": float(current_prices.get(ticker, 0.0)),
+                "reasoning": {"portfolio_only_position": True},
+            }
+
     message = HumanMessage(content=json.dumps(risk_analysis), name=agent_id)
     if state["metadata"]["show_reasoning"]:
         show_agent_reasoning(risk_analysis, "Risk Management Agent")

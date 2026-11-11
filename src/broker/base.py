@@ -1,9 +1,4 @@
-"""Broker abstraction.
-
-Only the read side is implemented so far: account, book, funds, quotes, and
-historical candles. Order placement will extend this interface (see the roadmap
-in the README) and must go through a guardrail layer, not straight from agents.
-"""
+"""Broker abstraction for account data and guarded order execution."""
 
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -37,6 +32,10 @@ class Broker(ABC):
     @abstractmethod
     def resolve(self, ticker: str, exchange: Optional[str] = None) -> InstrumentRef:
         """Map an internal ticker to its exchange instrument."""
+
+    @abstractmethod
+    def get_open_orders(self) -> list[dict]:
+        """Return active orders with their internal ticker and status."""
 
     def place_limit_order(
         self,

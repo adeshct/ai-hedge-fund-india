@@ -11,6 +11,8 @@ dist/
 .cache/
 data/cache/
 data/paper_portfolio.json
+data/paper_risk_state.json
+data/live_risk_state.json
 reports/
 *.pkl
 

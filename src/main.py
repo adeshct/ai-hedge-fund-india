@@ -12,11 +12,14 @@ Inspired by virattt/ai-hedge-fund (MIT License).
 """
 
 import argparse
+import logging
 import json
 import math
 import os
+import time
 import warnings
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
@@ -37,6 +40,7 @@ from src.data.universe import get_available_sectors
 load_dotenv()
 
 console = Console()
+logger = logging.getLogger(__name__)
 SECTORS = get_available_sectors()
 
 
@@ -68,6 +72,8 @@ def _needs_broker(args) -> bool:
 
 def _connect_broker(args):
     """Build the broker adapter when a flag needs it. Returns (broker, ok)."""
+    if hasattr(args, "_connected_broker"):
+        return args._connected_broker, True
     if not _needs_broker(args):
         return None, True
 
@@ -206,19 +212,53 @@ def cmd_run(args):
 
         _print_results(tickers, analyst_signals, decisions, show_reasoning)
         if execution_mode in {"paper", "live"}:
+            from src.broker.automation import (
+                DEFAULT_RISK_STATE,
+                check_daily_loss_limit,
+                load_risk_settings,
+            )
             from src.broker.execution import DEFAULT_PAPER_PORTFOLIO, execute_decisions
 
             risk_signals = analyst_signals.get("risk_management_agent", {})
-            execution_results = execute_decisions(
-                mode=execution_mode,
-                broker=broker,
-                decisions=decisions,
-                risk_signals=risk_signals,
-                portfolio=portfolio,
-                confidence_threshold=args.confidence_threshold,
-                max_order_value=args.max_order_value,
-                paper_portfolio_path=args.paper_portfolio or DEFAULT_PAPER_PORTFOLIO,
+            risk_settings = load_risk_settings()
+            risk_state_path = args.risk_state or DEFAULT_RISK_STATE.with_name(
+                f"{execution_mode}_risk_state.json"
             )
+            try:
+                halted, equity, loss_fraction = check_daily_loss_limit(
+                    portfolio,
+                    {ticker: signal.get("current_price", 0.0) for ticker, signal in risk_signals.items()},
+                    risk_settings["daily_heat_limit"],
+                    risk_state_path,
+                )
+            except ValueError as exc:
+                console.print(f"[red]Execution blocked by daily risk check: {exc}[/red]")
+                execution_results = []
+            else:
+                console.print(
+                    f"[dim]Portfolio equity: ₹{equity:,.0f} · "
+                    f"session drawdown: {loss_fraction:.2%}[/dim]"
+                )
+                if halted:
+                    console.print(
+                        f"[bold red]Daily loss limit ({risk_settings['daily_heat_limit']:.0%}) reached; "
+                        "new orders are halted for this session.[/bold red]"
+                    )
+                    execution_results = []
+                else:
+                    execution_results = execute_decisions(
+                        mode=execution_mode,
+                        broker=broker,
+                        decisions=decisions,
+                        risk_signals=risk_signals,
+                        portfolio=portfolio,
+                        confidence_threshold=args.confidence_threshold,
+                        max_order_value=args.max_order_value,
+                        risk_per_trade=risk_settings["risk_per_trade"],
+                        max_positions=risk_settings["max_positions"],
+                        session_only=bool(getattr(args, "_watch_mode", False)),
+                        paper_portfolio_path=args.paper_portfolio or DEFAULT_PAPER_PORTFOLIO,
+                    )
             _print_execution_results(execution_mode, execution_results)
 
     finally:
@@ -286,6 +326,86 @@ def _print_execution_results(mode, results):
     if mode == "live":
         console.print("[yellow]Live orders are limit orders and may remain unfilled; check their status with your broker.[/yellow]")
     console.print()
+
+
+def cmd_watch(args):
+    """Run analysis and guarded execution repeatedly during today's NSE session."""
+    from src.broker.automation import (
+        IST,
+        MARKET_CLOSE,
+        MARKET_OPEN,
+        is_nse_market_open,
+        load_risk_settings,
+        read_ticker_csv,
+    )
+    import yaml
+
+    try:
+        tickers = read_ticker_csv(args.ticker_csv)
+        load_risk_settings()
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        console.print(f"[red]Cannot start watch mode: {exc}[/red]")
+        return
+
+    if args.interval_minutes <= 0:
+        console.print("[red]--interval-minutes must be positive.[/red]")
+        return
+
+    broker, ok = _connect_broker(args)
+    if not ok:
+        return
+    args._connected_broker = broker
+    args._watch_mode = True
+    args.sector = None
+    console.rule(
+        f"[bold blue]Automated {args.execution_mode} watch · "
+        f"{len(tickers)} ticker(s) · every {args.interval_minutes} min[/bold blue]"
+    )
+    console.print(f"[dim]Ticker list: {Path(args.ticker_csv).resolve()}[/dim]")
+    if args.execution_mode == "live":
+        console.print("[bold yellow]Live orders are enabled. Press Ctrl+C to stop.[/bold yellow]")
+    else:
+        console.print("[dim]Paper trading is enabled. Press Ctrl+C to stop.[/dim]")
+
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        console.print("[yellow]NSE market is closed for the weekend; watch mode will not start.[/yellow]")
+        return
+    if now.time().replace(tzinfo=None) >= MARKET_CLOSE:
+        console.print("[yellow]Today's NSE session has ended; watch mode will not start.[/yellow]")
+        return
+    try:
+        if now.time().replace(tzinfo=None) < MARKET_OPEN:
+            console.print("[dim]Waiting for the NSE open at 09:15 IST...[/dim]")
+            while datetime.now(IST).time().replace(tzinfo=None) < MARKET_OPEN:
+                time.sleep(5)
+
+        interval_seconds = args.interval_minutes * 60
+        next_cycle = time.monotonic()
+        while is_nse_market_open():
+            if time.monotonic() < next_cycle:
+                time.sleep(min(1.0, next_cycle - time.monotonic()))
+                continue
+            try:
+                tickers = read_ticker_csv(args.ticker_csv)
+                args.ticker = ",".join(tickers)
+                args.start = "2024-01-01"
+                args.end = datetime.now(IST).strftime("%Y-%m-%d")
+                cmd_run(args)
+            except Exception:
+                logger.exception("Watch cycle failed; an order may have been submitted before the failure.")
+                console.print(
+                    "[red]Watch cycle failed; check the broker order book before restarting. "
+                    "Details were logged; retrying next cycle.[/red]"
+                )
+            next_cycle += interval_seconds
+            if next_cycle < time.monotonic():
+                console.print("[yellow]Analysis exceeded the interval; starting the next cycle without overlap.[/yellow]")
+                next_cycle = time.monotonic()
+    except KeyboardInterrupt:
+        console.print("[yellow]Watch stopped by user.[/yellow]")
+        return
+    console.print("[dim]NSE session ended; watch mode stopped.[/dim]")
 
 
 def cmd_analyze(args):
@@ -541,6 +661,7 @@ def main():
         "--paper-portfolio",
         help="Paper account JSON path (default: data/paper_portfolio.json)",
     )
+    run.add_argument("--risk-state", help="Daily loss-stop state file")
     run.add_argument("--no-save", action="store_true", help="Skip saving reports to disk")
     run.add_argument("--no-web-fallback", action="store_true", help="Skip web enrichment scraping")
     run.add_argument(
@@ -569,6 +690,29 @@ def main():
     scan.add_argument("--limit", type=int, default=10)
     scan.add_argument("--data-source", choices=["yfinance", "zerodha"], default="yfinance")
 
+    watch = subparsers.add_parser("watch", help="Continuously analyze and trade tickers from a CSV during NSE hours")
+    watch.add_argument("--ticker-csv", required=True, help="CSV with one ticker per row (optional ticker header)")
+    watch.add_argument("--interval-minutes", type=int, default=5, help="Analysis interval (default: 5)")
+    watch.add_argument(
+        "--execution-mode",
+        choices=["paper", "live"],
+        default="paper",
+        help="Persistent paper trading (default) or automatic live Zerodha orders",
+    )
+    watch.add_argument("--confidence-threshold", type=float, default=75.0)
+    watch.add_argument("--max-order-value", type=float, default=50000.0)
+    watch.add_argument("--initial-cash", type=float, default=10000000.0)
+    watch.add_argument("--margin-requirement", type=float, default=0.0)
+    watch.add_argument("--paper-portfolio", help="Paper account JSON path")
+    watch.add_argument("--risk-state", help="Daily loss-stop state file")
+    watch.add_argument("--model", default="deepseek-chat")
+    watch.add_argument("--provider", default="DeepSeek")
+    watch.add_argument("--show-reasoning", action="store_true")
+    watch.add_argument("--no-save", action="store_true")
+    watch.add_argument("--no-web-fallback", action="store_true")
+    watch.add_argument("--broker", choices=["zerodha"], help="Broker to use for live execution")
+    watch.add_argument("--data-source", choices=["yfinance", "zerodha"], default="yfinance")
+
     login = subparsers.add_parser("login", help="Authenticate with Zerodha Kite Connect")
     login.add_argument("--api-key", help="Kite API key (defaults to KITE_API_KEY)")
     login.add_argument("--request-token", help="request_token from the redirect URL (skips the prompt)")
@@ -581,13 +725,15 @@ def main():
     if not args.command:
         parser.print_help()
         return
-    if args.command == "run":
+    if args.command in {"run", "watch"}:
         if not math.isfinite(args.confidence_threshold) or not 0 <= args.confidence_threshold <= 100:
             parser.error("--confidence-threshold must be between 0 and 100")
         if not math.isfinite(args.max_order_value) or args.max_order_value <= 0:
             parser.error("--max-order-value must be positive")
-        if args.execution_mode == "live" and args.broker not in (None, "zerodha"):
+        if args.execution_mode == "live" and args.command == "watch" and args.broker not in (None, "zerodha"):
             parser.error("Live execution currently supports only Zerodha.")
+        if args.command == "watch" and args.interval_minutes <= 0:
+            parser.error("--interval-minutes must be positive")
 
     debug = args.debug or os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
     if not debug:
@@ -599,6 +745,7 @@ def main():
         "scan": cmd_scan,
         "login": cmd_login,
         "portfolio": cmd_portfolio,
+        "watch": cmd_watch,
     }
     commands.get(args.command, lambda a: parser.print_help())(args)
 

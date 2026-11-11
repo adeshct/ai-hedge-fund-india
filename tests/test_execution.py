@@ -13,6 +13,9 @@ class FakeBroker:
     def get_ltp(self, tickers):
         return {ticker: self.prices[ticker] for ticker in tickers if ticker in self.prices}
 
+    def get_open_orders(self):
+        return []
+
     def resolve(self, ticker):
         return InstrumentRef(exchange="NSE", tradingsymbol=ticker.removesuffix(".NS"), instrument_token=1)
 
@@ -29,6 +32,9 @@ class FakeKiteClient:
 
     def __init__(self):
         self.order = None
+
+    def orders(self):
+        return []
 
     def place_order(self, **kwargs):
         self.order = kwargs
@@ -61,6 +67,7 @@ def test_paper_execution_applies_confidence_risk_and_cash_caps(tmp_path):
         portfolio=portfolio,
         confidence_threshold=75,
         max_order_value=1000,
+        risk_per_trade=0.25,
         paper_portfolio_path=path,
     )
 
@@ -87,6 +94,7 @@ def test_paper_execution_skips_low_confidence_and_short_actions(tmp_path):
         portfolio=_portfolio(),
         confidence_threshold=75,
         max_order_value=1000,
+        risk_per_trade=0.25,
         paper_portfolio_path=tmp_path / "paper.json",
     )
 
@@ -103,6 +111,7 @@ def test_buy_size_scales_with_confidence(tmp_path):
         portfolio=_portfolio(),
         confidence_threshold=75,
         max_order_value=1000,
+        risk_per_trade=1.0,
         paper_portfolio_path=tmp_path / "paper.json",
     )
 
@@ -119,6 +128,8 @@ def test_live_execution_submits_limit_order_capped_by_risk_and_value():
         portfolio=_portfolio(),
         confidence_threshold=75,
         max_order_value=250,
+        risk_per_trade=0.25,
+        enforce_market_hours=False,
     )
 
     assert results[0]["status"] == "submitted"
@@ -137,6 +148,8 @@ def test_live_sell_is_limited_to_existing_long_shares():
         portfolio=_portfolio(quantity=3),
         confidence_threshold=75,
         max_order_value=1000,
+        risk_per_trade=0.25,
+        enforce_market_hours=False,
     )
 
     assert results[0]["quantity"] == 3
@@ -166,6 +179,65 @@ def test_zerodha_adapter_submits_delivery_limit_orders():
         "price": 100.0,
         "validity": "DAY",
     }
+
+
+def test_live_executor_skips_ticker_with_pending_order():
+    class BrokerWithOpenOrder(FakeBroker):
+        def get_open_orders(self):
+            return [{"ticker": "RELIANCE.NS", "status": "OPEN"}]
+
+    broker = BrokerWithOpenOrder({"RELIANCE.NS": 100})
+    result = execute_decisions(
+        mode="live",
+        broker=broker,
+        decisions={"RELIANCE.NS": {"action": "buy", "quantity": 2, "confidence": 90}},
+        risk_signals={"RELIANCE.NS": {"current_price": 100, "remaining_position_limit": 500}},
+        portfolio=_portfolio(),
+        confidence_threshold=75,
+        max_order_value=1000,
+        enforce_market_hours=False,
+    )
+
+    assert result[0]["status"] == "skipped"
+    assert "already open" in result[0]["reason"]
+    assert broker.orders == []
+
+
+def test_live_executor_fails_closed_outside_market_hours(monkeypatch):
+    import src.broker.execution as execution
+
+    monkeypatch.setattr(execution, "is_nse_market_open", lambda: False)
+    broker = FakeBroker({"RELIANCE.NS": 100})
+    result = execute_decisions(
+        mode="live",
+        broker=broker,
+        decisions={"RELIANCE.NS": {"action": "buy", "quantity": 2, "confidence": 90}},
+        risk_signals={"RELIANCE.NS": {"current_price": 100, "remaining_position_limit": 500}},
+        portfolio=_portfolio(),
+        confidence_threshold=75,
+        max_order_value=1000,
+    )
+
+    assert result[0]["reason"] == "Outside NSE market hours"
+    assert broker.orders == []
+
+
+def test_watch_paper_execution_skips_after_market_close(monkeypatch):
+    import src.broker.execution as execution
+
+    monkeypatch.setattr(execution, "is_nse_market_open", lambda: False)
+    result = execute_decisions(
+        mode="paper",
+        broker=None,
+        decisions={"RELIANCE.NS": {"action": "buy", "quantity": 2, "confidence": 90}},
+        risk_signals={"RELIANCE.NS": {"current_price": 100, "remaining_position_limit": 500}},
+        portfolio=_portfolio(),
+        confidence_threshold=75,
+        max_order_value=1000,
+        session_only=True,
+    )
+
+    assert result[0]["reason"] == "Outside NSE market hours"
 
 
 def test_existing_paper_account_is_loaded_without_resetting_cash(tmp_path):
